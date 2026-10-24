@@ -28,7 +28,8 @@ let mode = 'photo';            // 'photo' | 'video' | 'hires'
 let source = 'camera';         // 'camera' | 'image'
 let image = null;              // { el, w, h, date }
 let tab = 'camera';
-let dirty = true, busy = false, recording = null, shotCount = 0;
+let dirty = true, recording = null, shotCount = 0;
+let holdPreview = false; // 셔터 깜빡임이 덮는 한 프레임은 미리보기를 그리지 않아 반응을 바로 내보낸다
 let startSeq = 0;
 
 const filterIndex = () => Math.max(0, FILTERS.findIndex(f => f.id === settings.filter));
@@ -43,7 +44,6 @@ function currentSource() {
   if (video.readyState >= 2 && video.videoWidth) return { el: video, w: video.videoWidth, h: video.videoHeight };
   return null;
 }
-const stampOpts = date => ({ date: settings.date ? date : null, frameNo: shotCount + 1, stamp: curFilter().stamp });
 
 function previewLimits() {
   const r = $('finder').getBoundingClientRect();
@@ -55,6 +55,7 @@ function previewLimits() {
 function loop(t) {
   requestAnimationFrame(loop);
   if (tab !== 'camera' || mode === 'hires') return;
+  if (holdPreview) { holdPreview = false; return; }
   const src = currentSource();
   if (!src || !renderer) return;
   if (source === 'image' && !dirty) return; // 정지 사진은 바뀔 때만
@@ -70,12 +71,13 @@ function loop(t) {
       srcW: src.w, srcH: src.h, crop: plan.crop, outW: plan.contentW, outH: plan.contentH,
       flipX: mirrored(), time: t / 1000, seed: source === 'camera' ? Math.floor(t / 42) % 97 : 7,
     });
-    compose(vctx, gl, plan, stampOpts(source === 'image' ? image.date : new Date()));
+    compose(vctx, gl, plan, { date: settings.date ? (source === 'image' ? image.date : new Date()) : null, frameNo: shotCount + 1, stamp: curFilter().stamp });
   } catch (e) { console.warn(e); }
 }
 
 // ---------- 카메라 ----------
 function stopCamera() {
+  ic = null;
   stream?.getTracks().forEach(t => t.stop());
   stream = null;
   video.srcObject = null;
@@ -90,7 +92,8 @@ async function startCamera() {
     showMsg(isSecureContext ? '이 브라우저에서는 실시간 카메라를 쓸 수 없어요.\n고화질 촬영이나 불러오기는 쓸 수 있어요.' : 'https 주소로 열어야 카메라를 쓸 수 있어요.', false);
     return;
   }
-  const size = settings.quality === 'high' ? { width: { ideal: 4032 }, height: { ideal: 3024 } } : { width: { ideal: 1920 }, height: { ideal: 1440 } };
+  // 실시간 촬영은 미리보기가 부드러운 크기로(긴 변 2560 / 1920). 더 큰 원본은 고화질 모드(기본 카메라)
+  const size = settings.quality === 'high' ? { width: { ideal: 2560 }, height: { ideal: 1920 } } : { width: { ideal: 1920 }, height: { ideal: 1440 } };
   const wantAudio = mode === 'video' && settings.mic;
   const tries = [
     { video: { facingMode: settings.facing, ...size }, audio: wantAudio },
@@ -116,6 +119,7 @@ async function startCamera() {
   video.srcObject = s;
   try { await video.play(); } catch {}
   hasTorch = !!s.getVideoTracks()[0].getCapabilities?.().torch;
+  prepareImageCapture(s.getVideoTracks()[0]);
   dirty = true;
   setTimeout(updateThumbs, 600);
 }
@@ -207,86 +211,177 @@ async function countdown(sec) {
   c.textContent = '';
 }
 
-const toBlob = (c, type, q) => new Promise((ok, fail) => c.toBlob(b => (b ? ok(b) : fail(new Error('이미지를 만들지 못했어요'))), type, q));
-const withTimeout = (p, ms) => Promise.race([p, sleep(ms).then(() => { throw new Error('timeout'); })]);
+const toBlob = (c, type, q) => (c.convertToBlob
+  ? c.convertToBlob({ type, quality: q }) // OffscreenCanvas: 인코딩이 메인 스레드를 덜 막는다
+  : new Promise((ok, fail) => c.toBlob(b => (b ? ok(b) : fail(new Error('이미지를 만들지 못했어요'))), type, q)));
+// 다음 그림이 화면에 나간 직후(rAF 다음 작업)
+const nextFrame = () => new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+const canvasOf = (w, h) => ('OffscreenCanvas' in window ? new OffscreenCanvas(w, h) : el('canvas', { width: w, height: h }));
 
 async function makeThumb(canvas, size = 360) {
   const s = Math.min(1, size / Math.max(canvas.width, canvas.height));
-  const t = el('canvas', { width: Math.round(canvas.width * s), height: Math.round(canvas.height * s) });
+  const t = canvasOf(Math.round(canvas.width * s), Math.round(canvas.height * s));
   t.getContext('2d').drawImage(canvas, 0, 0, t.width, t.height);
   return toBlob(t, 'image/jpeg', 0.8);
 }
 
-// 안드로이드 크롬: ImageCapture로 카메라 전체 해상도 사진을 받는다. 안 되거나 방향이 미리보기와 다르면 null(→ 화면 프레임 사용)
-async function fullResPhoto(useFlash) {
-  const track = stream?.getVideoTracks()[0];
-  if (!track || !('ImageCapture' in window)) return null;
-  try {
-    const ic = new ImageCapture(track);
-    const caps = await withTimeout(ic.getPhotoCapabilities(), 2000);
-    const opts = {};
-    if (caps.imageWidth?.max) { opts.imageWidth = caps.imageWidth.max; opts.imageHeight = caps.imageHeight.max; }
-    if (useFlash && caps.fillLightMode?.includes('flash')) opts.fillLightMode = 'flash';
-    const blob = await withTimeout(ic.takePhoto(opts), 6000);
-    const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
-    const portraitPreview = video.videoHeight > video.videoWidth;
-    if ((bmp.height > bmp.width) !== portraitPreview || bmp.width * bmp.height <= video.videoWidth * video.videoHeight) { bmp.close(); return null; }
-    return { el: bmp, w: bmp.width, h: bmp.height, usedFlash: !!opts.fillLightMode };
-  } catch { return null; }
+// 누른 순간 앨범 자리에 지금 화면(이미 필터 입힘)을 작게 띄운다. 진짜 썸네일은 처리 뒤 바뀐다
+function quickThumb() {
+  const s = 120 / Math.max(view.width, view.height);
+  const t = el('canvas', { width: Math.max(1, Math.round(view.width * s)), height: Math.max(1, Math.round(view.height * s)) });
+  t.getContext('2d').drawImage(view, 0, 0, t.width, t.height);
+  const img = $('albumThumb');
+  if (img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
+  img.src = t.toDataURL('image/jpeg', 0.7);
 }
 
+function shutterFeedback() {
+  const f = $('flash');
+  f.classList.remove('on', 'blink');
+  void f.offsetWidth; // 연속으로 눌러도 매번 다시 깜빡이게
+  f.classList.add('blink');
+  holdPreview = !recording;
+  document.dispatchEvent(new Event('dj:shutter')); // 반응 시각 측정용(perf.mjs)
+  requestAnimationFrame(() => requestAnimationFrame(() => f.classList.remove('blink')));
+  tone('shutter');
+}
+
+// 안드로이드 크롬: ImageCapture. 사진 크기는 카메라를 켤 때 한 번만 알아 둔다(startCamera)
+let ic = null, icOpts = {}, icBusy = false;
+function prepareImageCapture(track) {
+  ic = null;
+  if (!('ImageCapture' in window)) return;
+  try {
+    const cap = new ImageCapture(track);
+    cap.getPhotoCapabilities().then(c => {
+      icOpts = c.imageWidth?.max ? { imageWidth: c.imageWidth.max, imageHeight: c.imageHeight.max } : {};
+      if (stream?.getVideoTracks()[0] === track) ic = cap;
+    }).catch(() => {});
+  } catch {}
+}
+// 300ms 안에 오면 전체 해상도 사진, 늦으면 null(누른 순간 잡아 둔 화면 프레임을 쓴다. 늦게 온 사진은 버림)
+function quickPhoto() {
+  if (!ic || icBusy) return null;
+  icBusy = true;
+  let late = false;
+  const p = ic.takePhoto(icOpts).then(b => createImageBitmap(b, { imageOrientation: 'from-image' })).finally(() => { icBusy = false; });
+  p.then(bmp => { if (late) bmp.close(); }, () => {});
+  return Promise.race([p.catch(() => null), sleep(300).then(() => { late = true; return null; })]);
+}
+
+// 누른 순간의 영상 프레임(원본 크기). createImageBitmap은 부르는 순간의 프레임을 잡는다
+async function grabFrame() {
+  const w = video.videoWidth, h = video.videoHeight;
+  if (window.createImageBitmap) {
+    try { return { el: await createImageBitmap(video), w, h }; } catch {}
+  }
+  const c = el('canvas', { width: w, height: h });
+  c.getContext('2d').drawImage(video, 0, 0);
+  return { el: c, w, h };
+}
+
+// 찍는 순간의 설정을 묶어 둔다(처리 중에 카메라를 바꿔도 그 사진은 그대로)
+const makeJob = (src, date) => ({
+  src, filter: curFilter(), frame: curFrame(), mirror: mirrored(), stamp: curFilter().stamp,
+  date: settings.date ? date : null, frameNo: shotCount + queue.length + 1,
+});
+
 // 원본 해상도로 필터를 입혀 JPEG로 만든다
-async function renderFull(src, date) {
+async function renderFull(job) {
+  const { src } = job;
   const maxSide = Math.min(renderer.maxSide, renderer.gl.getParameter(renderer.gl.MAX_VIEWPORT_DIMS)[0]);
   let maxPixels = MAX_PIXELS, plan, gl;
   for (let i = 0; i < 4; i++) {
-    plan = planOutput(src.w, src.h, curFrame(), { maxPixels, maxSide });
+    plan = planOutput(src.w, src.h, job.frame, { maxPixels, maxSide });
     renderer.upload(src.el);
-    gl = renderer.draw(curFilter(), {
+    gl = renderer.draw(job.filter, {
       srcW: src.w, srcH: src.h, crop: plan.crop, outW: plan.contentW, outH: plan.contentH,
-      flipX: mirrored(), time: performance.now() / 1000, seed: Math.random() * 90,
+      flipX: job.mirror, time: performance.now() / 1000, seed: Math.random() * 90,
     });
     // 메모리가 모자라면 브라우저가 그림 버퍼를 작게 만든다 → 한 단계 줄여 다시
     if (renderer.gl.drawingBufferWidth >= plan.contentW && renderer.gl.drawingBufferHeight >= plan.contentH) break;
     maxPixels /= 2;
   }
-  const out = el('canvas', { width: plan.outW, height: plan.outH });
-  compose(out.getContext('2d'), gl, plan, stampOpts(date));
+  const out = canvasOf(plan.outW, plan.outH);
+  compose(out.getContext('2d'), gl, plan, { date: job.date, frameNo: job.frameNo, stamp: job.stamp });
   dirty = true;
-  const blob = await toBlob(out, 'image/jpeg', 0.92);
   const thumb = await makeThumb(out);
+  const blob = await toBlob(out, 'image/jpeg', 0.92);
   out.width = out.height = 0; // 아이폰 캔버스 메모리 바로 돌려주기
-  return { type: 'photo', blob, thumb, w: plan.outW, h: plan.outH, filter: curFilter().id, frame: plan.frame };
+  return { type: 'photo', blob, thumb, w: plan.outW, h: plan.outH, filter: job.filter.id, frame: plan.frame };
+}
+
+// 처리 대기열: 셔터는 바로 받고, 무거운 렌더·인코딩·저장은 뒤에서 한 장씩. 메모리 보호로 최대 3장
+const MAX_QUEUE = 3;
+const queue = [];
+let working = false, preparing = false;
+const queueFull = () => queue.length >= MAX_QUEUE;
+
+function enqueue(job) {
+  queue.push(job);
+  pump();
+}
+async function pump() {
+  if (working) return;
+  working = true;
+  while (queue.length) {
+    const job = queue[0];
+    await nextFrame(); // 누른 화면 반응이 먼저 그려지게
+    try {
+      if (job.photo) { // 안드로이드 전체 해상도 사진이 제때 왔고, 방향이 같고, 더 크면 그걸 쓴다
+        const bmp = await job.photo;
+        if (bmp && (bmp.height > bmp.width) === (job.src.h > job.src.w) && bmp.width * bmp.height > job.src.w * job.src.h) {
+          job.src.el.close?.();
+          job.src = { el: bmp, w: bmp.width, h: bmp.height };
+        } else bmp?.close();
+      }
+      await keep(await renderFull(job));
+    } catch (e) {
+      showToast(e.message || '찍지 못했어요');
+    } finally {
+      if (job.src.el !== image?.el) job.src.el.close?.();
+      queue.shift();
+    }
+  }
+  working = false;
 }
 
 async function takePhoto() {
-  if (busy) return;
-  busy = true;
-  $('shutter').disabled = true;
+  if (preparing) return;
+  if (queueFull()) { showToast('앞 사진을 정리하는 중이에요'); return; }
+  if (source === 'image') {
+    shutterFeedback();
+    await nextFrame();
+    quickThumb();
+    enqueue(makeJob({ el: image.el, w: image.w, h: image.h }, image.date));
+    return;
+  }
+  if (!currentSource()) { showToast('아직 카메라가 준비되지 않았어요'); return; }
   const flash = $('flash');
+  let torchOn = false;
+  if (settings.timer || settings.flash) { preparing = true; $('shutter').disabled = true; }
   try {
-    if (source === 'image') { await keep(await renderFull(currentSource(), image.date)); return; }
-    if (!currentSource()) throw new Error('아직 카메라가 준비되지 않았어요');
     if (settings.timer) await countdown(settings.timer);
-    const full = await fullResPhoto(settings.flash && !mirrored());
-    let torchOn = false;
-    if (settings.flash && !full?.usedFlash) {
-      if (hasTorch && !mirrored()) { await setTorch(true); torchOn = true; await sleep(400); }
-      else { flash.classList.add('on'); await sleep(280); } // 화면을 하얗게 밝혀 얼굴을 비춘다
+    if (settings.flash) {
+      if (hasTorch && !mirrored()) { await setTorch(true); torchOn = true; await sleep(300); }
+      else { flash.classList.add('on'); await sleep(250); } // 화면을 하얗게 밝혀 얼굴을 비춘다
     }
-    const pending = renderFull(full || currentSource(), new Date());
-    if (torchOn) setTorch(false);
-    flash.classList.remove('on');
-    flash.classList.add('blink');
-    requestAnimationFrame(() => requestAnimationFrame(() => flash.classList.remove('blink')));
-    tone('shutter');
-    const shot = await pending;
-    full?.el.close?.();
-    await keep(shot);
+    // 반응(깜빡임)을 먼저 화면에 내보내고, 바로 다음 프레임을 잡는다(30fps 영상이라 한 프레임 안쪽 차이)
+    shutterFeedback();
+    const date = new Date();
+    await nextFrame();
+    const photo = quickPhoto();
+    const frame = grabFrame();
+    quickThumb();
+    const job = makeJob(await frame, date);
+    job.photo = photo;
+    enqueue(job);
   } catch (e) {
     showToast(e.message || '찍지 못했어요');
   } finally {
-    busy = false;
+    if (torchOn) setTorch(false);
+    flash.classList.remove('on');
+    preparing = false;
     $('shutter').disabled = false;
   }
 }
@@ -317,17 +412,11 @@ $('fileCapture').onchange = async e => {
   const f = e.target.files?.[0];
   e.target.value = '';
   if (!f) return;
-  busy = true;
-  $('shutter').disabled = true;
   try {
     const img = await loadImage(f);
-    const shot = await renderFull(img, img.date);
-    await keep(shot);
+    enqueue(makeJob(img, img.date));
   } catch (err) {
     showToast(err.message || '사진을 열 수 없어요');
-  } finally {
-    busy = false;
-    $('shutter').disabled = false;
   }
 };
 
