@@ -1,14 +1,14 @@
 {
   "name": "다정필름",
   "short_name": "다정필름",
-  "description": "일상을 오래된 필름 감성으로 찍는 카메라",
+  "description": "사랑할 때 보이는 순간들을 빈티지 필름으로 찍는 카메라",
   "lang": "ko",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#000000",
-  "theme_color": "#000000",
+  "background_color": "#0a0908",
+  "theme_color": "#0a0908",
   "icons": [
     { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
     { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },

@@ -7,7 +7,6 @@ export const FRAMES = [
   { id: 'instant', name: '인스턴트', aspect: () => 1, pad: [0.07, 0.07, 0.3, 0.07] },
   { id: 'film', name: '35mm 필름', aspect: (w, h) => (w >= h ? 3 / 2 : 2 / 3), pad: null },
   { id: 'slide', name: '슬라이드', aspect: (w, h) => (w >= h ? 3 / 2 : 2 / 3), pad: null },
-  { id: 'vhs', name: '캠코더 화면', aspect: null, pad: [0, 0, 0, 0] },
 ];
 
 export const frameById = id => FRAMES.find(f => f.id === id) || FRAMES[0];
@@ -47,20 +46,17 @@ export function planOutput(srcW, srcH, frameId, { maxPixels = 16e6, maxSide = 81
   };
 }
 
-// 옛날 카메라 날짜 스탬프: '26 10 23
+// 옛날 카메라 날짜 스탬프: '26 10 7 (해는 두 자리, 달·날은 앞에 0을 붙이지 않음)
 export function formatStamp(d) {
-  const p = n => String(n).padStart(2, '0');
-  return `'${p(d.getFullYear() % 100)} ${p(d.getMonth() + 1)} ${p(d.getDate())}`;
+  return `'${String(d.getFullYear() % 100).padStart(2, '0')} ${d.getMonth() + 1} ${d.getDate()}`;
 }
 
-const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
-export function formatOsd(d) {
+// 디카·캠코더 시각: 2026 10 13  9:53 AM
+export function formatDigital(d) {
   const h = d.getHours();
-  return {
-    time: `${h < 12 ? 'AM' : 'PM'} ${h % 12 || 12}:${String(d.getMinutes()).padStart(2, '0')}`,
-    date: `${MONTHS[d.getMonth()]}. ${d.getDate()} ${d.getFullYear()}`,
-  };
+  return `${d.getFullYear()} ${d.getMonth() + 1} ${d.getDate()}  ${h % 12 || 12}:${String(d.getMinutes()).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`;
 }
+
 
 // 7세그먼트 숫자. 각 숫자에 켜지는 마디: a(위) b(오른위) c(오른아래) d(아래) e(왼아래) f(왼위) g(가운데)
 const SEG = { 0: 'abcdef', 1: 'bc', 2: 'abdeg', 3: 'abcdg', 4: 'bcfg', 5: 'acdfg', 6: 'acdefg', 7: 'abc', 8: 'abcdefg', 9: 'abcdfg' };
@@ -109,7 +105,8 @@ export function drawSevenSeg(ctx, text, x, y, h, color) {
 }
 
 // 필터 입힌 사진(img: GL 캔버스)을 프레임과 함께 ctx에 그린다. ctx 캔버스 크기는 plan.outW×outH.
-export function compose(ctx, img, plan, { date = null, frameNo = 1 } = {}) {
+// stamp: 카메라마다 다른 날짜 모양 'orange' | 'digital' | 'camcorder' | 'instant'(인스턴트 프레임일 때만, 아니면 orange)
+export function compose(ctx, img, plan, { date = null, frameNo = 1, stamp = 'orange' } = {}) {
   const { outW, outH, contentX: x, contentY: y, contentW: w, contentH: h } = plan;
   const s = Math.min(w, h);
   ctx.save();
@@ -140,7 +137,9 @@ export function compose(ctx, img, plan, { date = null, frameNo = 1 } = {}) {
     ctx.strokeRect(x, y, w, h);
   }
 
-  if (plan.frame === 'vhs') drawOsd(ctx, plan, date);
+  if (stamp === 'camcorder') drawCamcorder(ctx, plan, date, frameNo);
+  else if (date && stamp === 'digital') drawDigital(ctx, plan, date);
+  else if (date && stamp === 'instant' && plan.frame === 'instant') drawCaption(ctx, plan, date);
   else if (date) {
     const sh = s * 0.045;
     const text = formatStamp(date);
@@ -220,25 +219,74 @@ function drawSlideMount(ctx, plan, date) {
   }
 }
 
-function drawOsd(ctx, plan, date) {
-  const { contentX: x, contentY: y, contentW: w, contentH: h } = plan;
-  const s = Math.min(w, h), m = s * 0.06, fs = Math.round(s * 0.05);
-  ctx.font = `700 ${fs}px "Courier New", ui-monospace, monospace`;
-  ctx.textBaseline = 'top';
-  ctx.shadowColor = 'rgba(0,0,0,0.7)';
+const MONO = '"Courier New", ui-monospace, Menlo, monospace';
+
+function osdText(ctx, fs) {
+  ctx.font = `700 ${fs}px ${MONO}`;
+  ctx.shadowColor = 'rgba(0,0,0,0.75)';
+  ctx.shadowBlur = 0;
   ctx.shadowOffsetX = ctx.shadowOffsetY = Math.max(1, fs * 0.08);
-  ctx.fillStyle = '#f4f4f0';
-  ctx.fillText('REC', x + m, y + m);
-  ctx.fillStyle = '#ff3b30';
-  ctx.beginPath(); ctx.arc(x + m + ctx.measureText('REC ').width + fs * 0.35, y + m + fs * 0.45, fs * 0.32, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#f4f4f0';
+  ctx.fillStyle = '#f6f6f2';
+}
+
+// 디카: 오른쪽 아래 흰 시각
+function drawDigital(ctx, plan, date) {
+  const { contentX: x, contentY: y, contentW: w, contentH: h } = plan;
+  const s = Math.min(w, h), fs = Math.round(s * 0.042);
+  ctx.save();
+  osdText(ctx, fs);
+  ctx.fillStyle = 'rgba(255,214,170,0.95)';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
+  ctx.fillText(formatDigital(date), x + w - s * 0.05, y + h - s * 0.05);
+  ctx.restore();
+}
+
+// 캠코더 화면: 왼쪽 위 배터리·남은 시간, 오른쪽 위 화질·남은 장수, 오른쪽 아래 시각
+function drawCamcorder(ctx, plan, date, frameNo) {
+  const { contentX: x, contentY: y, contentW: w, contentH: h } = plan;
+  const s = Math.min(w, h), m = s * 0.05, fs = Math.round(s * 0.05);
+  ctx.save();
+  osdText(ctx, fs);
+  // 배터리
+  const bw = fs * 1.1, bh = fs * 0.6, by = y + m + fs * 0.2;
+  ctx.fillStyle = '#f2d34a';
+  ctx.fillRect(x + m, by, bw, bh);
+  ctx.fillRect(x + m + bw, by + bh * 0.3, fs * 0.12, bh * 0.4);
+  ctx.fillStyle = '#f6f6f2';
+  ctx.textBaseline = 'top';
+  ctx.fillText(`${Math.max(5, 120 - (frameNo % 24) * 4)} MIN`, x + m + bw + fs * 0.4, y + m);
+  // 오른쪽 위: 화질, 남은 장수
+  const small = Math.round(fs * 0.8);
+  ctx.font = `700 ${small}px ${MONO}`;
   ctx.textAlign = 'right';
-  ctx.fillText('SP', x + w - m, y + m);
+  const rx = x + w - m - fs * 0.9;
+  ctx.fillText('5.0M', rx, y + m);
+  ctx.fillText(`${String(frameNo % 100).padStart(2, '0')}/99`, rx, y + m + small * 1.15);
+  ctx.fillStyle = '#3b6fd8';
+  ctx.fillRect(rx - ctx.measureText('00/99').width - small * 2.1, y + m + small * 1.2, small * 1.8, small * 0.9);
+  ctx.strokeStyle = '#f6f6f2';
+  ctx.lineWidth = Math.max(1, fs * 0.07);
+  ctx.strokeRect(x + w - m - fs * 0.6, y + m, fs * 0.5, fs * 0.8); // 메모리 카드
   if (date) {
-    const o = formatOsd(date);
-    ctx.textAlign = 'left';
+    ctx.font = `700 ${fs}px ${MONO}`;
+    ctx.fillStyle = '#f6f6f2';
     ctx.textBaseline = 'bottom';
-    ctx.fillText(o.time, x + m, y + h - m - fs * 1.2);
-    ctx.fillText(o.date, x + m, y + h - m);
+    ctx.fillText(formatDigital(date), x + w - m, y + h - m);
   }
+  ctx.restore();
+}
+
+// 즉석사진: 아래 흰 여백에 손글씨 날짜
+function drawCaption(ctx, plan, date) {
+  const { outH, contentX: x, contentY: y, contentW: w, contentH: h } = plan;
+  const s = Math.min(w, h), fs = Math.round(s * 0.07);
+  ctx.save();
+  ctx.font = `${fs}px "Bradley Hand", "Noteworthy", "Segoe Print", "Comic Sans MS", cursive`;
+  ctx.fillStyle = 'rgba(44,52,78,0.85)';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'right';
+  ctx.translate(x + w - s * 0.04, y + h + (outH - y - h) * 0.5);
+  ctx.rotate(-0.03);
+  ctx.fillText(`${date.getFullYear() % 100}.${date.getMonth() + 1}.${date.getDate()}`, 0, 0);
+  ctx.restore();
 }
