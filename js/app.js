@@ -280,9 +280,40 @@ async function grabFrame() {
   return { el: c, w, h };
 }
 
-// 찍는 순간의 설정을 묶어 둔다(처리 중에 카메라를 바꿔도 그 사진은 그대로)
+// 폰을 든 방향. 화면 회전 잠금으로 화면은 세로인데 폰을 가로로 들고 찍으면 영상은 세로로 들어온다.
+// 그때 사진을 가로로 돌려 저장해야 날짜 스탬프가 그 가로 사진의 오른쪽 아래에 바로 찍힌다(기본 카메라 앱과 같음).
+let tilt = null, tiltAsked = false;
+addEventListener('deviceorientation', e => { if (e.beta != null && e.gamma != null) tilt = [e.beta, e.gamma]; });
+// 아이폰은 방향 센서에 허락이 필요하다(누른 순간에만 물을 수 있음). 처음 한 번만 묻는다
+async function askTilt() {
+  if (tiltAsked || typeof window.DeviceOrientationEvent?.requestPermission !== 'function') return;
+  tiltAsked = true;
+  try { if (await DeviceOrientationEvent.requestPermission() === 'granted' && !tilt) await sleep(150); } catch {}
+}
+// 저장할 때 왼쪽으로 돌릴 횟수(90도 단위): 0 그대로, 1 왼쪽으로 90도, 3 오른쪽으로 90도
+function holdTurn() {
+  if (!tilt) return 0;
+  const [b, g] = tilt.map(v => v * Math.PI / 180);
+  const ux = -Math.sin(g) * Math.cos(b), uy = Math.sin(b); // 하늘 방향(화면 기준: 오른쪽 x, 위 y)
+  if (Math.hypot(ux, uy) < 0.5) return 0; // 거의 눕혀 들면(바닥·하늘 찍기) 판단하지 않는다
+  const screenAngle = screen.orientation?.angle ?? window.orientation ?? 0; // 화면이 따라 돌았으면 영상도 이미 돌아 있다
+  const q = ((Math.round((Math.atan2(ux, uy) * 180 / Math.PI - screenAngle) / 90) % 4) + 4) % 4;
+  return q === 2 ? 0 : q; // 거꾸로 들기는 잘못 읽기 쉬워 돌리지 않는다
+}
+// 원본을 왼쪽으로 q×90도 돌린 캔버스
+function turnSource(src, q) {
+  const c = el('canvas', { width: q % 2 ? src.h : src.w, height: q % 2 ? src.w : src.h });
+  const g = c.getContext('2d');
+  if (q === 1) { g.translate(0, c.height); g.rotate(-Math.PI / 2); }
+  if (q === 3) { g.translate(c.width, 0); g.rotate(Math.PI / 2); }
+  g.drawImage(src.el, 0, 0);
+  return { el: c, w: c.width, h: c.height };
+}
+
+// 찍는 순간의 설정을 묶어 둔다(처리 중에 카메라를 바꿔도 그 사진은 그대로).
+// 앞 카메라도 미리보기(거울)와 달리 실제 모습대로 저장한다(사용자 결정: 장면 속 글자가 바로 읽히게)
 const makeJob = (src, date) => ({
-  src, filter: curFilter(), frame: curFrame(), mirror: mirrored(), stamp: curFilter().stamp,
+  src, filter: curFilter(), frame: curFrame(), front: mirrored(), stamp: curFilter().stamp, turn: source === 'camera' ? holdTurn() : 0,
   date: settings.date ? date : null, frameNo: shotCount + queue.length + 1,
 });
 
@@ -296,7 +327,7 @@ async function renderFull(job) {
     renderer.upload(src.el);
     gl = renderer.draw(job.filter, {
       srcW: src.w, srcH: src.h, crop: plan.crop, outW: plan.contentW, outH: plan.contentH,
-      flipX: job.mirror, time: performance.now() / 1000, seed: Math.random() * 90,
+      time: performance.now() / 1000, seed: Math.random() * 90,
     });
     // 메모리가 모자라면 브라우저가 그림 버퍼를 작게 만든다 → 한 단계 줄여 다시
     if (renderer.gl.drawingBufferWidth >= plan.contentW && renderer.gl.drawingBufferHeight >= plan.contentH) break;
@@ -335,6 +366,11 @@ async function pump() {
           job.src = { el: bmp, w: bmp.width, h: bmp.height };
         } else bmp?.close();
       }
+      if (job.turn) { // 앞 카메라 원본은 거울 미리보기와 좌우가 반대라 반대쪽으로 돌린다
+        const turned = turnSource(job.src, job.front ? 4 - job.turn : job.turn);
+        job.src.el.close?.();
+        job.src = turned;
+      }
       await keep(await renderFull(job));
     } catch (e) {
       showToast(e.message || '찍지 못했어요');
@@ -357,6 +393,7 @@ async function takePhoto() {
     return;
   }
   if (!currentSource()) { showToast('아직 카메라가 준비되지 않았어요'); return; }
+  await askTilt();
   const flash = $('flash');
   let torchOn = false;
   if (settings.timer || settings.flash) { preparing = true; $('shutter').disabled = true; }

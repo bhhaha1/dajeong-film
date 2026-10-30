@@ -1,5 +1,5 @@
 // 오프라인용: 앱 파일을 처음 열 때 받아 두고, 그다음부터는 저장본을 먼저 쓴다.
-const CACHE = 'dajeong-film-v4';
+const CACHE = 'dajeong-film-v6';
 const FILES = ['./', 'index.html', 'style.css', 'manifest.webmanifest',
   'js/app.js', 'js/gl.js', 'js/filters.js', 'js/compose.js', 'js/store.js', 'js/media.js', 'js/exif.js', 'js/scenes.js', 'js/camera-art.js',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];

@@ -29,6 +29,7 @@ float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32)
 vec3 src(vec2 uv) {
   uv = clamp(uv, 0.0, 1.0);
   if (u_flipX > 0.5) uv.x = 1.0 - uv.x;
+  uv.y = 1.0 - uv.y; // 텍스처 첫 줄 = 원본 맨 위, 그림 버퍼 첫 줄 = 맨 아래
   return texture2D(u_tex, u_crop.xy + uv * u_crop.zw).rgb;
 }
 
@@ -149,7 +150,9 @@ export class Renderer {
     this.tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
     for (const [p, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, p, v);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    // 위아래 뒤집기는 셰이더에서 한다. UNPACK_FLIP_Y_WEBGL은 ImageBitmap(촬영 프레임)에는 적용되지 않아(WebGL 규격)
+    // 미리보기(video)는 바로 서고 저장본(ImageBitmap)만 거꾸로 저장됐다.
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   }
 
   upload(source) {
@@ -158,13 +161,13 @@ export class Renderer {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, source);
   }
 
-  // crop은 원본 픽셀 좌표 {x,y,w,h}. 원본 크기 srcW·srcH로 uv를 만든다(텍스처는 위아래가 뒤집혀 올라감).
+  // crop은 원본 픽셀 좌표 {x,y,w,h}. 원본 크기 srcW·srcH로 uv를 만든다(텍스처 y는 위에서부터).
   draw(filter, { srcW, srcH, crop, outW, outH, flipX = false, time = 0, seed = 0 }) {
     const gl = this.gl, u = this.u, p = resolve(filter);
     if (this.canvas.width !== outW || this.canvas.height !== outH) { this.canvas.width = outW; this.canvas.height = outH; }
     gl.viewport(0, 0, outW, outH);
     gl.uniform2f(u.u_res, outW, outH);
-    gl.uniform4f(u.u_crop, crop.x / srcW, 1 - (crop.y + crop.h) / srcH, crop.w / srcW, crop.h / srcH);
+    gl.uniform4f(u.u_crop, crop.x / srcW, crop.y / srcH, crop.w / srcW, crop.h / srcH);
     gl.uniform1f(u.u_flipX, flipX ? 1 : 0);
     gl.uniform1f(u.u_time, time);
     gl.uniform1f(u.u_seed, seed);
